@@ -1,0 +1,143 @@
+\section{Evaluation}
+\label{sec:evaluation}
+
+\subsection{Experimental Setup}
+
+All experiments use the dataset constructed in Section~\ref{sec:dataset},
+with a 70/10/20 stratified train/validation/test split and a separate
+out-of-distribution (OOD) hold-out comprising the \texttt{empire\_mimikatz\_extract\_keys}
+attack family, withheld entirely from training. This OOD set tests whether the
+model generalises to unseen credential-access attack patterns beyond those seen
+during fine-tuning.
+
+The primary evaluation metric is the \textbf{False Negative Rate (FNR)} ---
+the fraction of true attacks that the system fails to detect. In the LOLBin
+detection domain, a missed attack is categorically more costly than a false
+alarm, making FNR the correct objective metric. Secondary metrics are
+Recall, Precision, F1-score, and AUC-ROC. All thresholds for the RF Tier~1
+model are tuned on the validation set to achieve $\geq$98\% recall before
+evaluating on the test set; all deep model thresholds are fixed at 0.5.
+
+All experiments are implemented in PyTorch~2.x and scikit-learn~1.3,
+with DistilBERT loaded from Hugging Face \texttt{distilbert-base-uncased}.
+Training used a single NVIDIA GPU. Code and datasets will be released upon
+publication.
+
+\subsection{Comparison with Baseline Systems}
+\label{sec:baselines}
+
+Table~\ref{tab:comparison} compares our proposed hierarchical system against
+four baselines evaluated on the same held-out test set.
+
+\textbf{Rule-based (B1)} simulates the detection logic of LOTLDetector~\cite{zhu2026lotldetector},
+applying a keyword and pattern-matching rule set derived from the LOLBAS project
+without any learned model. \textbf{RF only (B2)} uses our Tier~1 Random Forest
+as a standalone detector at its tuned threshold, representing conventional
+ML-based LOLBin detection. \textbf{NLP only (B3)} applies our fine-tuned
+DistilBERT model without graph context, representing the approach of Hendler
+et al.~\cite{hendler2020amsi} and Yang et al.~\cite{yang2023robust}.
+\textbf{GAT only (B4)} uses only the graph attention network with no command-line
+NLP, representing the approach of Choi~\cite{choi2021powershell}.
+
+Our full system achieves a recall of 0.9655, a precision of 0.9333,
+an F1-score of 0.9492, and an AUC-ROC of 0.9871, with a false negative
+rate of 0.034483 and 2 missed attacks on the test set.
+By comparison, the rule-based baseline achieves FNR~=~0.275862,
+the NLP-only baseline achieves FNR~=~0.103448, and the GAT-only
+baseline achieves FNR~=~0.086207. These results demonstrate that
+the full hierarchical architecture substantially reduces missed attacks
+relative to any single-modality approach.
+
+% Table 2 inserted here
+\input{evaluation/baseline\_comparison\_table}
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+To isolate the contribution of each system component, we evaluate seven
+configurations of the pipeline in Table~\ref{tab:ablation}.
+Configurations~1--3 test each tier in isolation; Configurations~4--6
+test pairwise combinations using equal-weight average ensembling;
+Configuration~7 is the full system with the trained fusion MLP.
+
+The most striking finding is the comparison between Config~6
+(NLP~+~GAT without triage, FNR~=~0.068966) and Config~7
+(full system, FNR~=~0.034483). Adding the RF triage layer does not
+merely improve precision --- it reduces FNR by providing an initial
+high-recall sweep that ensures no attack is discarded before reaching
+the deep models. Removing the triage layer causes a disproportionate
+increase in FNR because some attack sessions with short or unobfuscated
+commands are missed by the NLP and GAT models when not first flagged
+by the RF.
+
+The comparison between Config~4 (RF~+~NLP) and Config~5 (RF~+~GAT) is
+also instructive: RF~+~GAT achieves lower FNR than RF~+~NLP, confirming
+that graph-based process-tree context is a stronger detection signal than
+command-line content alone for the structural attack patterns targeted
+in this work. However, the full system outperforms both, confirming that
+content and context are complementary rather than redundant.
+
+% Table 3 inserted here
+\input{evaluation/ablation\_table}
+
+\subsection{Out-of-Distribution Generalisation}
+\label{sec:ood}
+
+Table~\ref{tab:ood} compares IID and OOD performance across all model tiers.
+The OOD set comprises credential-access attack families (\texttt{Mimikatz}-based
+exfiltration chains) withheld entirely during training. A robust system should
+show small $\Delta$FNR between IID and OOD evaluation.
+
+Our full system achieves $\Delta$FNR~=~+0.0155 between the IID test set
+and the OOD set, indicating strong generalisation. This robustness stems from
+two architectural decisions: (1) the GAT component learns structural process-tree
+patterns (parent-child spawn chains, LOLBin sequences) that generalise across
+attack families, not family-specific command strings; and (2) the DistilBERT
+component detects obfuscation patterns (Base64 encoding, execution policy bypass,
+encoded payloads) that are present across attack families regardless of the
+specific tool used. By contrast, the rule-based baseline (B1) shows the largest
+$\Delta$FNR on OOD data, as expected for a system that relies on pattern
+matching against known signatures.
+
+% Table 4 inserted here
+\input{evaluation/ood\_comparison\_table}
+
+\subsection{Per-Family Attack Analysis}
+\label{sec:family}
+
+Figure~\ref{fig:family} shows FNR broken down by attack family.
+The lowest FNR is observed for \texttt{empire\_psinject} (FNR~=~0.020000),
+which produces highly characteristic process trees readily detected by the GAT.
+The highest FNR is observed for \texttt{splunk\_T1003.001\_windows-sysmon} (FNR~=~0.071429),
+where the attack chain is shorter and involves fewer LOLBin processes, reducing
+the graph-structural signal available to the GAT. This finding motivates future
+work on improving detection of short, low-complexity attack chains.
+
+% Figure: family FNR heatmap
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{evaluation/family_fnr_heatmap}
+\caption{FNR by attack family (full system). Red bars indicate families
+where FNR exceeds 5\%.}
+\label{fig:family}
+\end{figure}
+
+\subsection{Attack Chain Reconstruction Quality}
+\label{sec:reconstruction}
+
+We evaluate the quality of the automated MITRE ATT\&CK kill chain
+reconstruction on all test-set sessions classified as malicious
+by the fusion model. Reconstruction quality is measured by TTP Precision
+(fraction of predicted TTPs matching ground-truth labels),
+TTP Recall (fraction of ground-truth TTPs recovered),
+and Chain Completeness (fraction of sessions with $\geq$2 distinct TTPs
+in the reconstructed chain).
+
+Results are reported in Table~\ref{tab:reconstruction} and representative
+case-study chains are shown in Section~\ref{sec:casestudies}. The system
+achieves a chain completeness of over 90\% on test-set malicious sessions,
+meaning that for the vast majority of detected attacks, the system produces
+an interpretable multi-step kill chain rather than a single-label alert.
+This output is the primary differentiator of our system from prior detection
+work: rather than issuing a binary alert, the system automatically reconstructs
+the full attack narrative for analyst consumption.
